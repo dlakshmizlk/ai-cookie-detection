@@ -1,0 +1,23 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Secrets — never bake into the image. Mount at runtime instead.
+*.env
+secrets.*
+credentials/
+credentials.*
+*-credentials.json
+*-key.json
+*.pem
+cookie-banner-automation-key.pem
+
+# Per-machine path defaults — only meaningful on the developer's laptop;
+# Docker/EC2 should use env vars to point at bind-mounted secrets.
+src/local_config.py
+
+# Build / runtime artifacts the container does not need.
+outputs/
+user-data/

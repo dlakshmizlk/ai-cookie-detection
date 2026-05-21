@@ -1,0 +1,25 @@
+outputs/
+user-data/
+__pycache__/
+
+# Secrets — never commit. The application reads paths to these from
+# CLI flags / env vars; the files themselves should live OUTSIDE the
+# repo (e.g. ~/.cookie-detect/secrets/). The patterns below are a
+# safety net in case anything secret-ish accidentally lands here.
+*.env
+secrets.*
+credentials/
+credentials
+credentials.*
+*-credentials.json
+*-key.json
+*.pem
+cookie-banner-automation-key.pem
+
+# Per-machine path defaults (your personal copy of local_config.py.example).
+# The .example template IS committed; your filled-in copy is NOT.
+src/local_config.py
+
+.DS_Store
+.venv/
+unused_code

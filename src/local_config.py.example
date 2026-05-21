@@ -1,0 +1,33 @@
+"""Per-machine path defaults — TEMPLATE.
+
+HOW TO USE:
+    1. Copy this file alongside it, named ``local_config.py``:
+           cp src/local_config.py.example src/local_config.py
+    2. Edit the two paths below to point to YOUR secret files.
+    3. Done. From now on you can run the scraper without any
+       --secrets-env-path / --google-credentials-path flags.
+
+``src/local_config.py`` is gitignored — it will NOT be committed and
+will NOT be baked into the Docker image, so your personal paths stay
+private to this machine.
+
+Override priority (highest wins):
+    1. CLI flags (--secrets-env-path, --google-credentials-path)
+    2. Environment variables (SECRETS_ENV_PATH, GOOGLE_CREDENTIALS_PATH)
+    3. The values defined in this file.
+"""
+
+from __future__ import annotations
+
+# Path to your .env file. Must contain at least:
+#     OPENAI_API_KEY=sk-...
+# Recommendation: store it OUTSIDE the project folder, e.g. in
+#     ~/.cookie-detect/secrets.local.env
+SECRETS_ENV_PATH: str | None = "/Users/YOUR_NAME/.cookie-detect/secrets.local.env"
+
+# Path to the Google service-account JSON file downloaded from GCP.
+# Recommendation: store it OUTSIDE the project folder, e.g. in
+#     ~/.cookie-detect/secrets.google.credentials.json
+GOOGLE_CREDENTIALS_PATH: str | None = (
+    "/Users/YOUR_NAME/.cookie-detect/secrets.google.credentials.json"
+)
