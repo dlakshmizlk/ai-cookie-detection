@@ -15,6 +15,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import brotli
 from playwright.sync_api import Page, Request, Response, sync_playwright
@@ -173,15 +174,54 @@ class Scraper:
         def handle_request(request: Request) -> None:
             if any(pixel in request.url for pixel in self.pixels):
                 try:
+                    parsed_url = urlparse(request.url)
+
+                    # GET-style pixels carry their payload in the query
+                    # string; parse it into a structured dict so the
+                    # data is inspectable next to post_data. parse_qs
+                    # gives {key: [values]} — flatten single values
+                    # for readability.
+                    qs = parse_qs(parsed_url.query, keep_blank_values=True)
+                    url_params = {
+                        k: (v[0] if len(v) == 1 else v)
+                        for k, v in qs.items()
+                    }
+
                     payload = self._extract_payload(request)
+
+                    # The `request.headers` PROPERTY returns only the
+                    # script-level headers — it omits headers added by
+                    # Chromium's network stack (notably Cookie). The
+                    # `all_headers()` METHOD returns the full set as it
+                    # actually went on the wire. We need the latter to
+                    # see the Cookie header.
+                    req_headers = request.all_headers()
+                    cookie_header = req_headers.get("cookie", "")
+                    other_req_headers = {
+                        k: v for k, v in req_headers.items() if k != "cookie"
+                    }
+
+                    # The cookie jar as Playwright sees it for this URL.
+                    # May differ from the Cookie header on the wire
+                    # (race / domain-scoping nuances) — both are useful.
+                    cookies_in_jar = self.context.cookies(request.url)
+
                     captured_data.append({
                         "request_url": request.url,
                         "request_method": request.method,
+                        "url_host": parsed_url.netloc,
+                        "url_path": parsed_url.path,
+                        "url_params": url_params,
                         "post_data": payload,
-                        "cookies": self.context.cookies(request.url),
+                        "cookie_header": cookie_header,
+                        "request_headers": other_req_headers,
+                        "cookies": cookies_in_jar,
                     })
-                    log.debug("captured pixel: %s %s",
-                              request.method, request.url[:120])
+                    log.debug(
+                        "captured pixel: %s %s  params=%d  cookie_hdr=%dB  jar=%d",
+                        request.method, request.url[:100],
+                        len(url_params), len(cookie_header), len(cookies_in_jar),
+                    )
                 except Exception as exc:
                     # Don't fail the whole visit just because we couldn't
                     # decode one payload — capture the error so the
@@ -193,7 +233,12 @@ class Scraper:
                     captured_data.append({
                         "request_url": request.url,
                         "request_method": request.method,
+                        "url_host": "",
+                        "url_path": "",
+                        "url_params": {},
                         "post_data": None,
+                        "cookie_header": "",
+                        "request_headers": {},
                         "cookies": [],
                         "extract_error": f"{type(exc).__name__}: {exc}",
                     })
