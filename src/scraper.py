@@ -169,81 +169,108 @@ class Scraper:
         page = self.context.new_page()
         captured_data: list[dict] = []
 
-        # Request listener: snapshot any request whose URL matches one of
-        # our pixel substrings.
-        def handle_request(request: Request) -> None:
-            if any(pixel in request.url for pixel in self.pixels):
-                try:
-                    parsed_url = urlparse(request.url)
+        # Single listener using ``requestfinished`` — fires once per
+        # completed pixel exchange with BOTH the request and response
+        # available. This is more robust than separate request/response
+        # listeners because Playwright's sync API does NOT guarantee
+        # that ``response.request is request`` from the request event
+        # (they wrap the same underlying Playwright object in distinct
+        # Python proxies), which makes id()-based matching unreliable.
+        def handle_request_finished(request: Request) -> None:
+            if not any(pixel in request.url for pixel in self.pixels):
+                return
+            try:
+                # --- Response side -----------------------------------
+                response = request.response()
+                response_status: int | None = (
+                    response.status if response is not None else None
+                )
+                response_set_cookies: list[str] = []
+                if response is not None:
+                    # ``headers_array()`` preserves duplicate header
+                    # names — important because ``Set-Cookie`` is
+                    # commonly sent more than once on a single response.
+                    response_set_cookies = [
+                        h["value"]
+                        for h in response.headers_array()
+                        if h["name"].lower() == "set-cookie"
+                    ]
 
-                    # GET-style pixels carry their payload in the query
-                    # string; parse it into a structured dict so the
-                    # data is inspectable next to post_data. parse_qs
-                    # gives {key: [values]} — flatten single values
-                    # for readability.
-                    qs = parse_qs(parsed_url.query, keep_blank_values=True)
-                    url_params = {
-                        k: (v[0] if len(v) == 1 else v)
-                        for k, v in qs.items()
-                    }
+                # --- Request side ------------------------------------
+                parsed_url = urlparse(request.url)
+                qs = parse_qs(parsed_url.query, keep_blank_values=True)
+                url_params = {
+                    k: (v[0] if len(v) == 1 else v) for k, v in qs.items()
+                }
 
-                    payload = self._extract_payload(request)
+                payload = self._extract_payload(request)
 
-                    # The `request.headers` PROPERTY returns only the
-                    # script-level headers — it omits headers added by
-                    # Chromium's network stack (notably Cookie). The
-                    # `all_headers()` METHOD returns the full set as it
-                    # actually went on the wire. We need the latter to
-                    # see the Cookie header.
-                    req_headers = request.all_headers()
-                    cookie_header = req_headers.get("cookie", "")
-                    other_req_headers = {
-                        k: v for k, v in req_headers.items() if k != "cookie"
-                    }
+                # ``request.headers`` (property) returns only the
+                # script-level headers and omits headers added by
+                # Chromium's network stack (notably Cookie). The
+                # ``all_headers()`` method returns the full set as it
+                # went on the wire.
+                req_headers = request.all_headers()
+                cookie_header = req_headers.get("cookie", "")
+                other_req_headers = {
+                    k: v for k, v in req_headers.items() if k != "cookie"
+                }
 
-                    # The cookie jar as Playwright sees it for this URL.
-                    # May differ from the Cookie header on the wire
-                    # (race / domain-scoping nuances) — both are useful.
-                    cookies_in_jar = self.context.cookies(request.url)
+                # The cookie jar Playwright holds for this URL. May
+                # differ from cookie_header above when ``SameSite`` /
+                # third-party-cookie rules cause the browser to withhold
+                # some jar cookies from a specific request.
+                cookies_in_jar = self.context.cookies(request.url)
 
-                    captured_data.append({
-                        "request_url": request.url,
-                        "request_method": request.method,
-                        "url_host": parsed_url.netloc,
-                        "url_path": parsed_url.path,
-                        "url_params": url_params,
-                        "post_data": payload,
-                        "cookie_header": cookie_header,
-                        "request_headers": other_req_headers,
-                        "cookies": cookies_in_jar,
-                    })
-                    log.debug(
-                        "captured pixel: %s %s  params=%d  cookie_hdr=%dB  jar=%d",
-                        request.method, request.url[:100],
-                        len(url_params), len(cookie_header), len(cookies_in_jar),
-                    )
-                except Exception as exc:
-                    # Don't fail the whole visit just because we couldn't
-                    # decode one payload — capture the error so the
-                    # operator can see it in the per-site output.
-                    log.warning(
-                        "pixel capture failed for %s: %s: %s",
-                        request.url[:120], type(exc).__name__, exc,
-                    )
-                    captured_data.append({
-                        "request_url": request.url,
-                        "request_method": request.method,
-                        "url_host": "",
-                        "url_path": "",
-                        "url_params": {},
-                        "post_data": None,
-                        "cookie_header": "",
-                        "request_headers": {},
-                        "cookies": [],
-                        "extract_error": f"{type(exc).__name__}: {exc}",
-                    })
+                captured_data.append({
+                    "request_url": request.url,
+                    "request_method": request.method,
+                    "url_host": parsed_url.netloc,
+                    "url_path": parsed_url.path,
+                    "url_params": url_params,
+                    "post_data": payload,
+                    "cookie_header": cookie_header,
+                    "request_headers": other_req_headers,
+                    "cookies": cookies_in_jar,
+                    "response_status": response_status,
+                    "response_set_cookies": response_set_cookies,
+                })
+                log.debug(
+                    "captured pixel: %s %s -> %s  params=%d  "
+                    "cookie_hdr=%dB  jar=%d  set_cookies=%d",
+                    request.method, request.url[:100], response_status,
+                    len(url_params), len(cookie_header),
+                    len(cookies_in_jar), len(response_set_cookies),
+                )
+            except Exception as exc:
+                # Don't fail the whole visit just because we couldn't
+                # process one pixel — capture the error so the operator
+                # can see it in the per-site output.
+                log.warning(
+                    "pixel capture failed for %s: %s: %s",
+                    request.url[:120], type(exc).__name__, exc,
+                )
+                captured_data.append({
+                    "request_url": request.url,
+                    "request_method": request.method,
+                    "url_host": "",
+                    "url_path": "",
+                    "url_params": {},
+                    "post_data": None,
+                    "cookie_header": "",
+                    "request_headers": {},
+                    "cookies": [],
+                    "response_status": None,
+                    "response_set_cookies": [],
+                    "extract_error": f"{type(exc).__name__}: {exc}",
+                })
 
-        page.on("request", handle_request)
+        # Note: ``requestfinished`` fires after the response has been
+        # fully received. Aborted / network-failed requests will NOT
+        # appear here — they fire ``requestfailed`` instead. For our
+        # tracker-pixel use case that's the right trade-off: a request
+        # with no response has no Set-Cookie data worth capturing.
+        page.on("requestfinished", handle_request_finished)
 
         try:
             log.debug("page.goto(%s)", website)
