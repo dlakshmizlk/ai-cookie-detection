@@ -26,6 +26,50 @@ from src.retry import retry_with_backoff
 log = logging.getLogger(__name__)
 
 
+# PII cookies — when --mask-pii is set, these get their values replaced
+# with "<masked>" before the captured data is written to disk. The set
+# below covers Facebook's identity-bearing cookies; extend as needed for
+# other platforms.
+#
+# Why these three (not all five FB auth cookies):
+#   c_user — the literal Facebook account ID. Definitely PII.
+#   xs     — session token. Possession lets someone hijack the session.
+#   fr     — auth-related token. Identity-bearing.
+#   datr   — browser-level identifier; less identity-rich. NOT masked here.
+#   sb     — login signal; less identity-rich. NOT masked here.
+_PII_COOKIE_NAMES = {"c_user", "xs", "fr"}
+
+
+def _mask_cookie_header(header: str) -> str:
+    """Replace PII cookie values inside a ``Cookie:`` header string with
+    ``<masked>``. Non-PII cookies are passed through unchanged."""
+    if not header:
+        return header
+    masked_parts: list[str] = []
+    for kv in header.split(";"):
+        kv = kv.strip()
+        if "=" in kv:
+            name, _, _value = kv.partition("=")
+            if name.strip() in _PII_COOKIE_NAMES:
+                masked_parts.append(f"{name.strip()}=<masked>")
+            else:
+                masked_parts.append(kv)
+        else:
+            masked_parts.append(kv)
+    return "; ".join(masked_parts)
+
+
+def _mask_cookies_list(cookies: list[dict]) -> list[dict]:
+    """Return a copy of the cookie-jar entry list with PII values masked."""
+    result: list[dict] = []
+    for c in cookies:
+        c2 = dict(c)
+        if c2.get("name") in _PII_COOKIE_NAMES:
+            c2["value"] = "<masked>"
+        result.append(c2)
+    return result
+
+
 @dataclass
 class VisitResults:
     """Everything we learn about visiting a single website."""
@@ -89,17 +133,39 @@ class Scraper:
         delete_user_data: bool = True,
         run_local: bool = True,
         use_proxy: bool = True,
+        auth_profile_path: Path | None = None,
+        mask_pii: bool = False,
     ) -> None:
         log.info(
-            "Initialising Scraper (run_local=%s, use_proxy=%s, pixels=%d)",
+            "Initialising Scraper (run_local=%s, use_proxy=%s, pixels=%d, "
+            "auth_profile=%s, mask_pii=%s)",
             run_local, use_proxy, len(pixels),
+            auth_profile_path or "<none>", mask_pii,
         )
 
         self.playwright = sync_playwright().start()
+        self.mask_pii = mask_pii
 
-        self.user_data_dir = Path("./user-data")
-        self.delete_user_data = delete_user_data
-        self._delete_user_data()
+        # If an auth profile is given, use it as the persistent Chromium
+        # profile and DO NOT wipe it (it holds the logged-in cookies).
+        # Otherwise use the default ./user-data dir and wipe per the
+        # delete_user_data flag (anonymous mode).
+        if auth_profile_path is not None:
+            self.user_data_dir = Path(auth_profile_path)
+            self.delete_user_data = False
+            if not self.user_data_dir.exists():
+                raise FileNotFoundError(
+                    f"Auth profile directory does not exist: {self.user_data_dir}. "
+                    f"Bootstrap it first: python -m src.auth_login --profile <name>"
+                )
+            log.info(
+                "AUTH MODE: using persistent profile at %s (NOT wiping)",
+                self.user_data_dir,
+            )
+        else:
+            self.user_data_dir = Path("./user-data")
+            self.delete_user_data = delete_user_data
+            self._delete_user_data()
 
         self.context = self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(self.user_data_dir),
@@ -221,6 +287,13 @@ class Scraper:
                 # third-party-cookie rules cause the browser to withhold
                 # some jar cookies from a specific request.
                 cookies_in_jar = self.context.cookies(request.url)
+
+                # Apply PII masking if requested. Masks c_user / xs / fr
+                # values in both cookie_header (string) and cookies (list of
+                # dicts) so the JSON we write is safe to share externally.
+                if self.mask_pii:
+                    cookie_header = _mask_cookie_header(cookie_header)
+                    cookies_in_jar = _mask_cookies_list(cookies_in_jar)
 
                 captured_data.append({
                     "request_url": request.url,

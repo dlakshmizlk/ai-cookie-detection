@@ -136,6 +136,34 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Show DEBUG-level log lines on the console (file always has DEBUG).",
     )
+    parser.add_argument(
+        "--auth-profile",
+        dest="auth_profile",
+        default=None,
+        help=(
+            "Name of a persistent Chromium profile to use (logged-in mode). "
+            "Resolves to ~/.cookie-detect/profiles/<name>/. "
+            "Bootstrap with: python -m src.auth_login --profile <name>"
+        ),
+    )
+    parser.add_argument(
+        "--mask-pii",
+        dest="mask_pii",
+        action="store_true",
+        help=(
+            "Mask PII cookie values (c_user, xs, fr) before writing JSON. "
+            "Use this when producing outputs to share externally (e.g., with lawyers)."
+        ),
+    )
+    parser.add_argument(
+        "--site",
+        dest="single_site",
+        default=None,
+        help=(
+            "Override the input sheet with a single URL (smoke-testing). "
+            "Pixels list still comes from the sheet."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -183,8 +211,25 @@ def main(argv: list[str] | None = None) -> int:
     from src.logging_config import configure_logging
     from src.scraper import Scraper
 
-    # --- 3. Environment label + run folder -----------------------------
-    env_label = config.get_env_label(run_local=args.run_local)
+    # --- 3a. Resolve auth profile (if --auth-profile given) ------------
+    auth_profile_path = None
+    auth_label_suffix = ""
+    if args.auth_profile:
+        auth_profile_path = (
+            Path.home() / ".cookie-detect" / "profiles" / args.auth_profile
+        )
+        if not auth_profile_path.exists():
+            sys.stderr.write(
+                f"ERROR: auth profile '{args.auth_profile}' not found at "
+                f"{auth_profile_path}\n"
+                f"       Bootstrap it first:\n"
+                f"         python -m src.auth_login --profile {args.auth_profile}\n"
+            )
+            return 2
+        auth_label_suffix = f"-loggedin-{args.auth_profile}"
+
+    # --- 3b. Environment label + run folder ----------------------------
+    env_label = config.get_env_label(run_local=args.run_local) + auth_label_suffix
     run_id = config.make_run_id(env_label)
     base_dir = config.get_base_output_dir(run_local=args.run_local)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -211,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     log.info("  google_creds_path  = %s", google_creds_path)
     log.info("  run_local          = %s", args.run_local)
     log.info("  use_proxy          = %s", args.use_proxy)
+    log.info("  auth_profile       = %s", args.auth_profile or "<none, anonymous>")
+    log.info("  mask_pii           = %s", args.mask_pii)
+    log.info("  single_site        = %s", args.single_site or "<none, full sheet>")
     log.info("  gpt_model          = %s", config.GPT_MODEL)
     log.info("  spreadsheet        = %s", config.SPREADSHEET_NAME)
     log.info("=" * 72)
@@ -224,12 +272,24 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("Failed to read inputs from Google Sheet")
         return 3
 
-    websites = input_mngr.websites
     pixels = input_mngr.pixels
-    log.info(
-        "Loaded %d websites and %d pixel patterns from sheet '%s'",
-        len(websites), len(pixels), config.SPREADSHEET_NAME,
-    )
+
+    # If --site was passed, override the sheet's websites with the single
+    # smoke-test URL. Pixels still come from the sheet.
+    if args.single_site:
+        from src.helper_funcs import normalize_url
+        websites = [normalize_url(args.single_site)]
+        log.info(
+            "Smoke-test mode: overriding sheet with single site %s",
+            websites[0],
+        )
+    else:
+        websites = input_mngr.websites
+        log.info(
+            "Loaded %d websites and %d pixel patterns from sheet '%s'",
+            len(websites), len(pixels), config.SPREADSHEET_NAME,
+        )
+
     if not websites:
         log.warning("No websites in input sheet — nothing to do.")
         return 0
@@ -240,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
         pixels=pixels,
         run_local=args.run_local,
         use_proxy=args.use_proxy,
+        auth_profile_path=auth_profile_path,
+        mask_pii=args.mask_pii,
     )
 
     # --- 7. Per-site loop ----------------------------------------------
@@ -355,6 +417,11 @@ def main(argv: list[str] | None = None) -> int:
         "pixels_count": len(pixels),
         "run_local": args.run_local,
         "use_proxy": args.use_proxy,
+        "auth_mode": (
+            f"loggedin:{args.auth_profile}" if args.auth_profile else "anonymous"
+        ),
+        "pii_masked": args.mask_pii,
+        "single_site_override": args.single_site,
         "gpt_model": config.GPT_MODEL,
         "sites": per_site_summary,
     }
